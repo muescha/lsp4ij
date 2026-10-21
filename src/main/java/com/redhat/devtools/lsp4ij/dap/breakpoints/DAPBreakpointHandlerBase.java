@@ -15,6 +15,7 @@ import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.xdebugger.XDebugSession;
 import com.intellij.xdebugger.XExpression;
 import com.intellij.xdebugger.XSourcePosition;
+import com.intellij.xdebugger.breakpoints.SuspendPolicy;
 import com.intellij.xdebugger.breakpoints.XBreakpoint;
 import com.intellij.xdebugger.breakpoints.XBreakpointType;
 import com.redhat.devtools.lsp4ij.dap.descriptors.DebugAdapterDescriptor;
@@ -80,19 +81,78 @@ public abstract class DAPBreakpointHandlerBase<B extends XBreakpoint<?>> extends
     }
 
     private static void addSourceBreakpoint(@NotNull XSourcePosition sourcePosition,
-                                            @Nullable XExpression conditionExpression,
-                                            @NotNull Map<Source, List<SourceBreakpoint>> targetBreakpoints) {
+                                            @Nullable XBreakpoint<?> breakpoint,
+                                            @NotNull Map<Source, List<BreakpointToSend>> targetBreakpoints) {
         Source source = toDAPSource(sourcePosition);
-        int lineNumber = getLineNumber(sourcePosition);
+        List<BreakpointToSend> sourceBreakpoints = targetBreakpoints
+                .computeIfAbsent(source, s -> new ArrayList<>());
+        sourceBreakpoints.add(new BreakpointToSend(getLineNumber(sourcePosition), breakpoint));
+    }
+
+    /**
+     * Converts an IntelliJ breakpoint to a DAP source breakpoint for a debug adapter with the given capabilities.
+     *
+     * @param line         the DAP line number (1-based).
+     * @param breakpoint   the IntelliJ breakpoint, or null for a temporary breakpoint (e.g. "Run to Cursor").
+     * @param capabilities the capabilities of the debug adapter.
+     * @return the DAP source breakpoint.
+     */
+    static @NotNull SourceBreakpoint toSourceBreakpoint(int line,
+                                                        @Nullable XBreakpoint<?> breakpoint,
+                                                        @NotNull Capabilities capabilities) {
         SourceBreakpoint sourceBreakpoint = new SourceBreakpoint();
-        sourceBreakpoint.setLine(lineNumber);
+        sourceBreakpoint.setLine(line);
+        if (breakpoint == null) {
+            return sourceBreakpoint;
+        }
+        XExpression conditionExpression = breakpoint.getConditionExpression();
         if (conditionExpression != null) {
             // Breakpoint with condition
             sourceBreakpoint.setCondition(conditionExpression.getExpression());
         }
-        List<SourceBreakpoint> sourceBreakpoints = targetBreakpoints
-                .computeIfAbsent(source, s -> new ArrayList<>());
-        sourceBreakpoints.add(sourceBreakpoint);
+        if (isSentAsLogPoint(breakpoint, capabilities)) {
+            // Log point: the debug adapter logs the message and doesn't stop.
+            sourceBreakpoint.setLogMessage(toLogMessage(breakpoint.getLogExpressionObject()));
+        }
+        return sourceBreakpoint;
+    }
+
+    /**
+     * Returns true if the given breakpoint is sent as a DAP log point ('logMessage') and false otherwise.
+     * <p>
+     * A DAP log point never stops, so it is used only when the IntelliJ breakpoint doesn't suspend and
+     * only logs its "Evaluate and log" expression. In all other cases the breakpoint is sent as a normal
+     * breakpoint: the debug adapter stops, IntelliJ handles the "Breakpoint hit" message, the stack trace
+     * and the log expression, and the execution is resumed if the breakpoint doesn't suspend
+     * (see {@link com.redhat.devtools.lsp4ij.dap.client.DAPClient#stopped}).
+     *
+     * @param breakpoint   the IntelliJ breakpoint.
+     * @param capabilities the capabilities of the debug adapter.
+     * @return true if the given breakpoint is sent as a DAP log point and false otherwise.
+     */
+    public static boolean isSentAsLogPoint(@NotNull XBreakpoint<?> breakpoint,
+                                           @NotNull Capabilities capabilities) {
+        if (!Boolean.TRUE.equals(capabilities.getSupportsLogPoints())) {
+            return false;
+        }
+        if (breakpoint.getSuspendPolicy() != SuspendPolicy.NONE
+                || breakpoint.isLogMessage()
+                || breakpoint.isLogStack()) {
+            return false;
+        }
+        XExpression logExpression = breakpoint.getLogExpressionObject();
+        if (logExpression == null || logExpression.getExpression().isBlank()) {
+            return false;
+        }
+        // DAP interpolates expressions enclosed in {} and defines no escaping, so an expression
+        // which contains braces cannot be embedded safely: it is evaluated by IntelliJ instead.
+        String expression = logExpression.getExpression();
+        return expression.indexOf('{') == -1 && expression.indexOf('}') == -1;
+    }
+
+    private static @NotNull String toLogMessage(@NotNull XExpression logExpression) {
+        // An IntelliJ log expression is a single expression, a DAP log message is a template.
+        return "{" + logExpression.getExpression().trim() + "}";
     }
 
     private static @NotNull Source toDAPSource(@NotNull XSourcePosition sourcePosition) {
@@ -109,12 +169,12 @@ public abstract class DAPBreakpointHandlerBase<B extends XBreakpoint<?>> extends
     @Override
     protected @NotNull CompletableFuture<@Nullable Void> doSendBreakpoints(@Nullable IDebugProtocolServer debugProtocolServer,
                                                                            @Nullable TemporaryBreakpoint temporaryBreakpoint) {
-        // Convert list of IJ XBreakpoint -> LSP SourceBreakpoint
-        Map<Source, List<SourceBreakpoint>> targetBreakpoints = new HashMap<>();
+        // Group the IJ XBreakpoint per DAP Source
+        Map<Source, List<BreakpointToSend>> targetBreakpoints = new HashMap<>();
         for (B breakpoint : breakpoints) {
             var sourcePosition = breakpoint.getSourcePosition();
             if (sourcePosition != null) {
-                addSourceBreakpoint(sourcePosition, breakpoint.getConditionExpression(), targetBreakpoints);
+                addSourceBreakpoint(sourcePosition, breakpoint, targetBreakpoints);
             }
         }
 
@@ -132,35 +192,29 @@ public abstract class DAPBreakpointHandlerBase<B extends XBreakpoint<?>> extends
             }
         }
 
+        // Call 'setBreakpoints' DAP request for each Source keys and the given debug protocol server,
+        // or for each registered debug protocol server
+        List<IDebugProtocolServer> servers = debugProtocolServer != null ? List.of(debugProtocolServer) : debugProtocolServers;
         final var setBreakpointsFutures = new ArrayList<CompletableFuture<Void>>();
-        for (Iterator<Map.Entry<Source, List<SourceBreakpoint>>> iterator = targetBreakpoints.entrySet()
-                .iterator(); iterator.hasNext(); ) {
-            Map.Entry<Source, List<SourceBreakpoint>> entry = iterator.next();
-
-            Source source = entry.getKey();
-            List<SourceBreakpoint> sourceBreakpoints = entry.getValue();
-
-            // Call 'setBreakpoints' DAP request for each Source keys.
-            final var arguments = createSetBreakpointsArguments(source, sourceBreakpoints);
-            if (debugProtocolServer != null) {
-                // Call 'setBreakpoints' DAP request for each Source keys
-                // and the given debug protocol server
-                setBreakpointsFutures.add(setBreakpoints(debugProtocolServer, arguments));
-            } else {
-                // Call 'setBreakpoints' DAP request for each Source keys
-                // for each registered debug protocol server
-                for (var server : debugProtocolServers) {
-                    setBreakpointsFutures.add(setBreakpoints(server, arguments));
-                }
-            }
-
-            // Once we told adapter there are no breakpoints for a source file, we can stop
-            // tracking that file
-            if (sourceBreakpoints.isEmpty()) {
-                iterator.remove();
+        for (var server : servers) {
+            // The SourceBreakpoint depends on the capabilities of the debug adapter (ex: log points)
+            Capabilities capabilities = getCapabilities(server);
+            for (Map.Entry<Source, List<BreakpointToSend>> entry : targetBreakpoints.entrySet()) {
+                List<SourceBreakpoint> sourceBreakpoints = entry.getValue()
+                        .stream()
+                        .map(b -> toSourceBreakpoint(b.line(), b.breakpoint(), capabilities))
+                        .toList();
+                final var arguments = createSetBreakpointsArguments(entry.getKey(), sourceBreakpoints);
+                setBreakpointsFutures.add(setBreakpoints(server, arguments));
             }
         }
         return CompletableFuture.allOf(setBreakpointsFutures.toArray(EMPTY_COMPLETABLE_FUTURES));
+    }
+
+    /**
+     * A breakpoint to send at the given DAP line, with its IntelliJ breakpoint or null for a temporary breakpoint.
+     */
+    private record BreakpointToSend(int line, @Nullable XBreakpoint<?> breakpoint) {
     }
 
     private CompletableFuture<Void> setBreakpoints(@NotNull IDebugProtocolServer debugProtocolServer,

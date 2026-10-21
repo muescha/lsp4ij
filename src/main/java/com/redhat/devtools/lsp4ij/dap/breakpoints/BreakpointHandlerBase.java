@@ -30,7 +30,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Base class for DAP/Disassembly breakpoint handler.
@@ -49,6 +51,7 @@ public abstract class BreakpointHandlerBase<B extends XBreakpoint<?>> extends XB
     protected final @NotNull Project project;
     protected final List<IDebugProtocolServer> debugProtocolServers = ContainerUtil.createConcurrentList();
     protected final List<B> breakpoints = ContainerUtil.createConcurrentList();
+    private final Map<IDebugProtocolServer, Capabilities> capabilitiesByServer = new ConcurrentHashMap<>();
 
     public BreakpointHandlerBase(@NotNull Class<? extends XBreakpointType<B, ?>> breakpointTypeClass,
                                  @NotNull XDebugSession debugSession,
@@ -62,8 +65,39 @@ public abstract class BreakpointHandlerBase<B extends XBreakpoint<?>> extends XB
 
     public CompletableFuture<@Nullable Void> initialize(@NotNull IDebugProtocolServer debugProtocolServer,
                                                         @NotNull Capabilities capabilities) {
+        this.capabilitiesByServer.put(debugProtocolServer, capabilities);
         this.debugProtocolServers.add(debugProtocolServer);
         return sendBreakpoints(debugProtocolServer, null);
+    }
+
+    /**
+     * Updates the capabilities of the given debug adapter (DAP 'capabilities' event) and, if the
+     * breakpoints were already sent to it, sends them again so that they use the new capabilities
+     * (e.g. log points once 'supportsLogPoints' is reported).
+     *
+     * @param debugProtocolServer the debug adapter.
+     * @param capabilities        the updated capabilities.
+     * @return the completable future.
+     */
+    public CompletableFuture<@Nullable Void> updateCapabilities(@NotNull IDebugProtocolServer debugProtocolServer,
+                                                                @NotNull Capabilities capabilities) {
+        this.capabilitiesByServer.put(debugProtocolServer, capabilities);
+        if (!debugProtocolServers.contains(debugProtocolServer)) {
+            // Breakpoints not sent yet: initialize() will send them with these capabilities.
+            return CompletableFuture.completedFuture(null);
+        }
+        return sendBreakpoints(debugProtocolServer, null);
+    }
+
+    /**
+     * Returns the capabilities of the given debug adapter.
+     *
+     * @param debugProtocolServer the debug adapter.
+     * @return the capabilities of the given debug adapter, or empty capabilities if they are not known.
+     */
+    protected @NotNull Capabilities getCapabilities(@NotNull IDebugProtocolServer debugProtocolServer) {
+        Capabilities capabilities = capabilitiesByServer.get(debugProtocolServer);
+        return capabilities != null ? capabilities : new Capabilities();
     }
 
     @Override
@@ -111,6 +145,7 @@ public abstract class BreakpointHandlerBase<B extends XBreakpoint<?>> extends XB
     @Override
     public void dispose() {
         debugProtocolServers.clear();
+        capabilitiesByServer.clear();
     }
 
     protected CompletableFuture<@Nullable Void> sendBreakpoints(@Nullable IDebugProtocolServer debugProtocolServer,

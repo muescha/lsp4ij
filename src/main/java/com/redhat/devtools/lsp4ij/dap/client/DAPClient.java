@@ -24,6 +24,7 @@ import com.intellij.openapi.progress.ProgressIndicator;
 import com.intellij.openapi.project.Project;
 import com.intellij.ui.LightweightHint;
 import com.intellij.xdebugger.XDebugSession;
+import com.intellij.xdebugger.XExpression;
 import com.intellij.xdebugger.breakpoints.XBreakpoint;
 import com.intellij.xdebugger.frame.XSuspendContext;
 import com.redhat.devtools.lsp4ij.LSPIJUtils;
@@ -53,6 +54,7 @@ import javax.swing.*;
 import java.awt.*;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.lang.reflect.Method;
 import java.lang.Thread;
 import java.util.*;
 import java.util.List;
@@ -282,6 +284,60 @@ public class DAPClient implements IDebugProtocolClient, Disposable {
     }
 
     @Override
+    public void capabilities(CapabilitiesEventArguments args) {
+        Capabilities update = args.getCapabilities();
+        if (update == null) {
+            return;
+        }
+        // The debug adapter updates some of its capabilities after the 'initialize' response
+        // (ex: once the target is known after 'launch' / 'attach').
+        // Merge them synchronously (once the 'initialize' response is known): an adapter which sends
+        // this event before the 'initialized' event gets its breakpoints sent once, with these capabilities.
+        capabilitiesFuture.thenAccept(capabilities -> {
+            if (capabilities == null) {
+                return;
+            }
+            mergeCapabilities(capabilities, update);
+            if (isDebug) {
+                // Send the breakpoints again if they were already sent, since they depend on the
+                // capabilities (ex: log points)
+                threadPool.execute(() -> debugProcess
+                        .getBreakpointHandler()
+                        .updateCapabilities(getDebugProtocolServer(), capabilities));
+            }
+        });
+    }
+
+    /**
+     * Copies the non-null capabilities of the given update into the given capabilities.
+     * <p>
+     * As defined by the DAP 'capabilities' event, a capability which is not part of the update is unchanged.
+     *
+     * @param capabilities the capabilities to update.
+     * @param update       the updated capabilities.
+     */
+    static void mergeCapabilities(@NotNull Capabilities capabilities,
+                                  @NotNull Capabilities update) {
+        for (Method getter : Capabilities.class.getMethods()) {
+            if (getter.getDeclaringClass() != Capabilities.class
+                    || getter.getParameterCount() != 0
+                    || !getter.getName().startsWith("get")) {
+                continue;
+            }
+            try {
+                Object value = getter.invoke(update);
+                if (value != null) {
+                    Capabilities.class
+                            .getMethod("set" + getter.getName().substring(3), getter.getReturnType())
+                            .invoke(capabilities, value);
+                }
+            } catch (ReflectiveOperationException e) {
+                // getter without setter: ignore it
+            }
+        }
+    }
+
+    @Override
     public CompletableFuture<Void> startDebugging(StartDebuggingRequestArguments args) {
         final var parameters = new HashMap<String, Object>(args.getConfiguration());
         DAPClient client = getServerDescriptor().createClient(debugProcess, parameters, isDebug, debugMode, serverTrace, this);
@@ -412,10 +468,53 @@ public class DAPClient implements IDebugProtocolClient, Disposable {
                                             }
                                         }
                                     } else {
-                                        session.breakpointReached(breakpoint, null, context);
+                                        breakpointReached(breakpoint, args, stackFrame, context);
                                     }
                                 }
                             });
+                });
+    }
+
+    /**
+     * Notifies IntelliJ that the given breakpoint has been reached.
+     * <p>
+     * IntelliJ prints the "Breakpoint hit" message, the stack trace and the evaluated "Evaluate and log"
+     * expression, and returns false when the breakpoint doesn't suspend. In this case the debug adapter
+     * must be resumed (see {@link XDebugSession#breakpointReached}).
+     */
+    private void breakpointReached(@NotNull XBreakpoint<?> breakpoint,
+                                   @NotNull StoppedEventArguments args,
+                                   @NotNull StackFrame topFrame,
+                                   @NotNull XSuspendContext context) {
+        evaluateLogExpression(breakpoint, topFrame)
+                .thenAccept(evaluatedLogExpression -> {
+                    XDebugSession session = getSession();
+                    if (session.breakpointReached(breakpoint, evaluatedLogExpression, context)) {
+                        return;
+                    }
+                    if (StoppedEventArgumentsReason.BREAKPOINT.equals(args.getReason())) {
+                        // The breakpoint doesn't suspend: resume the debug adapter
+                        continue_(args.getThreadId());
+                    } else {
+                        // The debug adapter stopped for another reason (ex: a step ended on the breakpoint line)
+                        session.positionReached(context);
+                    }
+                });
+    }
+
+    private @NotNull CompletableFuture<@Nullable String> evaluateLogExpression(@NotNull XBreakpoint<?> breakpoint,
+                                                                               @NotNull StackFrame topFrame) {
+        XExpression logExpression = breakpoint.getLogExpressionObject();
+        if (logExpression == null || logExpression.getExpression().isBlank()) {
+            return CompletableFuture.completedFuture(null);
+        }
+        String expression = logExpression.getExpression();
+        return evaluate(expression, topFrame.getId(), EvaluateArgumentsContext.WATCH)
+                .handle((response, error) -> {
+                    if (error != null) {
+                        return "Cannot evaluate '" + expression + "': " + error.getMessage();
+                    }
+                    return response != null ? response.getResult() : null;
                 });
     }
 
