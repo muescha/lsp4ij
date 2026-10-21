@@ -343,6 +343,12 @@ public class DAPClient implements IDebugProtocolClient, Disposable {
     @Override
     public void capabilities(CapabilitiesEventArguments args) {
         adapterCapabilities.update(args);
+        if (isDebug && args != null && args.getCapabilities() != null) {
+            // The breakpoints depend on the capabilities (ex: log points): send them again if they were already sent
+            threadPool.execute(() -> debugProcess
+                    .getBreakpointHandler()
+                    .capabilitiesChanged(getDebugProtocolServer()));
+        }
     }
 
     @Override

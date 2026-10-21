@@ -125,6 +125,21 @@ public abstract class BreakpointHandlerBase<B extends XBreakpoint<?>> extends XB
     }
 
     /**
+     * Sends the breakpoints again to the given DAP server, after its 'capabilities' event changed its capabilities
+     * (ex: log points once 'supportsLogPoints' is reported). Does nothing before
+     * {@link #initialize(IDebugProtocolServer, Supplier)} sent them: they are sent then with the current capabilities.
+     *
+     * @param debugProtocolServer the DAP server.
+     * @return the future of the sent breakpoints.
+     */
+    public CompletableFuture<@Nullable Void> capabilitiesChanged(@NotNull IDebugProtocolServer debugProtocolServer) {
+        if (!debugProtocolServers.contains(debugProtocolServer)) {
+            return CompletableFuture.completedFuture(null);
+        }
+        return sendBreakpoints(debugProtocolServer, null);
+    }
+
+    /**
      * Returns the capabilities of the given initialized DAP server, and empty capabilities otherwise.
      *
      * @param debugProtocolServer the DAP server.
