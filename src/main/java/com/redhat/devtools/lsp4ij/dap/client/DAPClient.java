@@ -58,6 +58,7 @@ import javax.swing.*;
 import java.awt.*;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.lang.reflect.Method;
 import java.lang.Thread;
 import java.util.*;
 import java.util.List;
@@ -292,6 +293,60 @@ public class DAPClient implements IDebugProtocolClient, Disposable {
     @Override
     public void initialized() {
         initialized.complete(null);
+    }
+
+    @Override
+    public void capabilities(CapabilitiesEventArguments args) {
+        Capabilities update = args.getCapabilities();
+        if (update == null) {
+            return;
+        }
+        // The debug adapter updates some of its capabilities after the 'initialize' response
+        // (ex: once the target is known after 'launch' / 'attach').
+        // Merge them synchronously (once the 'initialize' response is known): an adapter which sends
+        // this event before the 'initialized' event gets its breakpoints sent once, with these capabilities.
+        capabilitiesFuture.thenAccept(capabilities -> {
+            if (capabilities == null) {
+                return;
+            }
+            mergeCapabilities(capabilities, update);
+            if (isDebug) {
+                // Send the breakpoints again if they were already sent, since they depend on the
+                // capabilities (ex: log points)
+                threadPool.execute(() -> debugProcess
+                        .getBreakpointHandler()
+                        .updateCapabilities(getDebugProtocolServer(), capabilities));
+            }
+        });
+    }
+
+    /**
+     * Copies the non-null capabilities of the given update into the given capabilities.
+     * <p>
+     * As defined by the DAP 'capabilities' event, a capability which is not part of the update is unchanged.
+     *
+     * @param capabilities the capabilities to update.
+     * @param update       the updated capabilities.
+     */
+    static void mergeCapabilities(@NotNull Capabilities capabilities,
+                                  @NotNull Capabilities update) {
+        for (Method getter : Capabilities.class.getMethods()) {
+            if (getter.getDeclaringClass() != Capabilities.class
+                    || getter.getParameterCount() != 0
+                    || !getter.getName().startsWith("get")) {
+                continue;
+            }
+            try {
+                Object value = getter.invoke(update);
+                if (value != null) {
+                    Capabilities.class
+                            .getMethod("set" + getter.getName().substring(3), getter.getReturnType())
+                            .invoke(capabilities, value);
+                }
+            } catch (ReflectiveOperationException e) {
+                // getter without setter: ignore it
+            }
+        }
     }
 
     @Override
