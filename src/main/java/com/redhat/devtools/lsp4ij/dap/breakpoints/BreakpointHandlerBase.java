@@ -44,6 +44,11 @@ public abstract class BreakpointHandlerBase<B extends XBreakpoint<?>> extends XB
 
     protected static final CompletableFuture<?>[] EMPTY_COMPLETABLE_FUTURES = new CompletableFuture[0];
     protected static final @NotNull Key<Integer> DAP_BREAKPOINT_ID = Key.create("dap.breakpoint.id");
+    /**
+     * The line where the debug adapter installed the breakpoint, which can differ from the IntelliJ line
+     * (ex: debugpy moves a breakpoint on a blank line to the previous statement).
+     */
+    protected static final @NotNull Key<Integer> DAP_BREAKPOINT_LINE = Key.create("dap.breakpoint.line");
 
     protected final @NotNull XDebugSession debugSession;
     protected final @NotNull DebugAdapterDescriptor debugAdapterDescriptor;
@@ -143,6 +148,9 @@ public abstract class BreakpointHandlerBase<B extends XBreakpoint<?>> extends XB
                 updateBreakpoint(breakpoint, breakpointWithId);
             }
             return;
+        }
+        if (breakpoint.getLine() != null) {
+            ijBreakpoint.putUserData(DAP_BREAKPOINT_LINE, breakpoint.getLine());
         }
         if (ijBreakpoint instanceof XLineBreakpoint<?> lineBreakpoint) {
             // Update the IntelliJ breakpoint according the DAP breakpoint 'verified' flag.

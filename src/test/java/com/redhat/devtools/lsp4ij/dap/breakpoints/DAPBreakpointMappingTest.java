@@ -100,11 +100,47 @@ public class DAPBreakpointMappingTest extends HeavyPlatformTestCase {
             stopped.setHitBreakpointIds(new Integer[]{7});
             assertSame(breakpoint, handler.findBreakpoint(stopped, frame));
 
-            // Without ids, the breakpoint is searched by the line of the stack frame
+            // Without ids, the breakpoint is searched by the line of the stack frame:
+            // the line where the debug adapter moved it...
             stopped.setHitBreakpointIds(null);
-            assertNull(handler.findBreakpoint(stopped, frame));
+            assertSame(breakpoint, handler.findBreakpoint(stopped, frame));
+            // ...or its IntelliJ line
             frame.setLine(1);
             assertSame(breakpoint, handler.findBreakpoint(stopped, frame));
+            frame.setLine(3);
+            assertNull(handler.findBreakpoint(stopped, frame));
+        } finally {
+            handler.dispose();
+        }
+    }
+
+    public void testDebugpyMovesBreakpointsToThePreviousStatement() throws Exception {
+        // Recorded with the debugpy bundled in IntelliJ IDEA 2026.3: breakpoints on a blank line (3) and on a
+        // comment (4) are both moved to the statement on line 2, and the 'stopped' event has no hitBreakpointIds.
+        var blankLine = breakpoint("a.lua", 2);
+        var comment = breakpoint("a.lua", 3);
+        var handler = initialize(List.of(blankLine, comment), arguments -> {
+            var results = new ArrayList<Breakpoint>();
+            for (int i = 0; i < arguments.getBreakpoints().length; i++) {
+                var result = new Breakpoint();
+                result.setId(i);
+                result.setVerified(true);
+                result.setLine(2);
+                results.add(result);
+            }
+            return response(results.toArray(new Breakpoint[0]));
+        });
+        try {
+            assertEquals(Set.of("verified:a.lua:2", "verified:a.lua:3"), new HashSet<>(presentations));
+
+            var frame = new StackFrame();
+            var source = new Source();
+            source.setPath(dir.resolve("a.lua").toString());
+            frame.setSource(source);
+            frame.setLine(2);
+            var stopped = new StoppedEventArguments();
+            stopped.setReason(StoppedEventArgumentsReason.BREAKPOINT);
+            assertNotNull(handler.findBreakpoint(stopped, frame));
         } finally {
             handler.dispose();
         }
@@ -206,7 +242,7 @@ public class DAPBreakpointMappingTest extends HeavyPlatformTestCase {
 
     private XLineBreakpoint<DAPBreakpointProperties> breakpoint(String fileName, int line) throws Exception {
         Path path = dir.resolve(fileName);
-        Files.writeString(path, "local a = 1\nlocal b = 2\nlocal c = 3\n");
+        Files.writeString(path, "local a = 1\nlocal b = 2\n\n-- comment\nlocal c = 3\n");
         var file = LocalFileSystem.getInstance().refreshAndFindFileByNioFile(path);
         assertNotNull(file);
         return WriteAction.compute(() -> XDebuggerManager.getInstance(getProject()).getBreakpointManager()

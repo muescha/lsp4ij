@@ -252,6 +252,9 @@ public abstract class DAPBreakpointHandlerBase<B extends XBreakpoint<?>> extends
 
     /**
      * Returns the IntelliJ breakpoint from the DAP source and given line and null otherwise.
+     * <p>
+     * A breakpoint on the given line is returned first. Otherwise, a breakpoint which the debug adapter
+     * moved to the given line (see {@link #DAP_BREAKPOINT_LINE}) is returned.
      *
      * @param source     the DAP source.
      * @param lineNumber the line number.
@@ -267,26 +270,30 @@ public abstract class DAPBreakpointHandlerBase<B extends XBreakpoint<?>> extends
         if (filePath == null) {
             return null;
         }
+        B movedBreakpoint = null;
         for (B breakpoint : breakpoints) {
             XSourcePosition breakpointPosition = breakpoint.getSourcePosition();
-            if (breakpointPosition == null) {
+            if (breakpointPosition == null || !isSameFile(breakpointPosition.getFile(), filePath)) {
                 continue;
             }
-            VirtualFile fileInBreakpoint = breakpointPosition.getFile();
-            int line = breakpointPosition.getLine() + 1;
-            if (fileInBreakpoint.isInLocalFileSystem()) {
-                if (fileInBreakpoint.toNioPath().equals(filePath) && line == lineNumber) {
-                    return breakpoint;
-                }
-            } else {
-                // Virtual files (e.g. DAPFile backed by LightVirtualFile) don't support toNioPath().
-                // Fall back to comparing the VirtualFile path as a string. See #1447.
-                if (fileInBreakpoint.getPath().equals(filePath.toString()) && line == lineNumber) {
-                    return breakpoint;
-                }
+            if (breakpointPosition.getLine() + 1 == lineNumber) {
+                return breakpoint;
+            }
+            if (movedBreakpoint == null && Integer.valueOf(lineNumber).equals(breakpoint.getUserData(DAP_BREAKPOINT_LINE))) {
+                movedBreakpoint = breakpoint;
             }
         }
-        return null;
+        return movedBreakpoint;
+    }
+
+    private static boolean isSameFile(@NotNull VirtualFile fileInBreakpoint,
+                                      @NotNull Path filePath) {
+        if (fileInBreakpoint.isInLocalFileSystem()) {
+            return fileInBreakpoint.toNioPath().equals(filePath);
+        }
+        // Virtual files (e.g. DAPFile backed by LightVirtualFile) don't support toNioPath().
+        // Fall back to comparing the VirtualFile path as a string. See #1447.
+        return fileInBreakpoint.getPath().equals(filePath.toString());
     }
 
     /**
