@@ -100,13 +100,12 @@ public class DAPBreakpointMappingTest extends HeavyPlatformTestCase {
             stopped.setHitBreakpointIds(new Integer[]{7});
             assertSame(breakpoint, handler.findBreakpoint(stopped, frame));
 
-            // Without ids, the breakpoint is searched by the line of the stack frame:
-            // the line where the debug adapter moved it...
+            // Without ids, the breakpoint is searched by the line where the debug adapter installed it...
             stopped.setHitBreakpointIds(null);
             assertSame(breakpoint, handler.findBreakpoint(stopped, frame));
-            // ...or its IntelliJ line
+            // ...not by its IntelliJ line, which the debug adapter moved away from (ex: a step ends there)
             frame.setLine(1);
-            assertSame(breakpoint, handler.findBreakpoint(stopped, frame));
+            assertNull(handler.findBreakpoint(stopped, frame));
             frame.setLine(3);
             assertNull(handler.findBreakpoint(stopped, frame));
         } finally {
@@ -141,6 +140,33 @@ public class DAPBreakpointMappingTest extends HeavyPlatformTestCase {
             var stopped = new StoppedEventArguments();
             stopped.setReason(StoppedEventArgumentsReason.BREAKPOINT);
             assertNotNull(handler.findBreakpoint(stopped, frame));
+        } finally {
+            handler.dispose();
+        }
+    }
+
+    public void testStopPrefersTheBreakpointWhichWasNotMoved() throws Exception {
+        // Line 2 has a breakpoint, and the debug adapter moves the breakpoint of the blank line 3 to line 2
+        var moved = breakpoint("a.lua", 2);
+        var notMoved = breakpoint("a.lua", 1);
+        var handler = initialize(List.of(moved, notMoved), arguments -> {
+            var results = new ArrayList<Breakpoint>();
+            for (var sourceBreakpoint : arguments.getBreakpoints()) {
+                var result = new Breakpoint();
+                result.setId(sourceBreakpoint.getLine());
+                result.setVerified(true);
+                result.setLine(2);
+                results.add(result);
+            }
+            return response(results.toArray(new Breakpoint[0]));
+        });
+        try {
+            var frame = new StackFrame();
+            var source = new Source();
+            source.setPath(dir.resolve("a.lua").toString());
+            frame.setSource(source);
+            frame.setLine(2);
+            assertSame(notMoved, handler.findBreakpoint(new StoppedEventArguments(), frame));
         } finally {
             handler.dispose();
         }

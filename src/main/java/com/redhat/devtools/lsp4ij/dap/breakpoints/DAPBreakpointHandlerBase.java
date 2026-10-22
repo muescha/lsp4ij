@@ -203,6 +203,8 @@ public abstract class DAPBreakpointHandlerBase<B extends XBreakpoint<?>> extends
                         }
                         Breakpoint breakpointResponse = breakpoints[i];
                         ijBreakpoint.putUserData(DAP_BREAKPOINT_ID, breakpointResponse.getId());
+                        // Forget a line reported by a previous response, if this one reports none
+                        ijBreakpoint.putUserData(DAP_BREAKPOINT_LINE, breakpointResponse.getLine());
                         updateBreakpoint(breakpointResponse, ijBreakpoint);
                     }
                 });
@@ -253,8 +255,9 @@ public abstract class DAPBreakpointHandlerBase<B extends XBreakpoint<?>> extends
     /**
      * Returns the IntelliJ breakpoint from the DAP source and given line and null otherwise.
      * <p>
-     * A breakpoint on the given line is returned first. Otherwise, a breakpoint which the debug adapter
-     * moved to the given line (see {@link #DAP_BREAKPOINT_LINE}) is returned.
+     * A breakpoint is compared by its effective line (see {@link #getEffectiveLine}): a breakpoint which
+     * the debug adapter moved away from the given line is not returned, and a breakpoint which it moved to
+     * the given line is. When several breakpoints match, a breakpoint which was not moved is returned first.
      *
      * @param source     the DAP source.
      * @param lineNumber the line number.
@@ -273,17 +276,29 @@ public abstract class DAPBreakpointHandlerBase<B extends XBreakpoint<?>> extends
         B movedBreakpoint = null;
         for (B breakpoint : breakpoints) {
             XSourcePosition breakpointPosition = breakpoint.getSourcePosition();
-            if (breakpointPosition == null || !isSameFile(breakpointPosition.getFile(), filePath)) {
+            if (breakpointPosition == null
+                    || !isSameFile(breakpointPosition.getFile(), filePath)
+                    || getEffectiveLine(breakpoint, breakpointPosition) != lineNumber) {
                 continue;
             }
             if (breakpointPosition.getLine() + 1 == lineNumber) {
                 return breakpoint;
             }
-            if (movedBreakpoint == null && Integer.valueOf(lineNumber).equals(breakpoint.getUserData(DAP_BREAKPOINT_LINE))) {
+            if (movedBreakpoint == null) {
                 movedBreakpoint = breakpoint;
             }
         }
         return movedBreakpoint;
+    }
+
+    /**
+     * Returns the line where the debug adapter installed the given breakpoint (see {@link #DAP_BREAKPOINT_LINE}),
+     * or its IntelliJ line if the debug adapter didn't report one.
+     */
+    private int getEffectiveLine(@NotNull B breakpoint,
+                                 @NotNull XSourcePosition breakpointPosition) {
+        Integer dapLine = breakpoint.getUserData(DAP_BREAKPOINT_LINE);
+        return dapLine != null ? dapLine : breakpointPosition.getLine() + 1;
     }
 
     private static boolean isSameFile(@NotNull VirtualFile fileInBreakpoint,
