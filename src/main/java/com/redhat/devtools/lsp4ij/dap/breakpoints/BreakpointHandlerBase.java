@@ -29,6 +29,7 @@ import org.jetbrains.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 
@@ -136,8 +137,12 @@ public abstract class BreakpointHandlerBase<B extends XBreakpoint<?>> extends XB
     public void updateBreakpoint(@NotNull Breakpoint breakpoint,
                                  @Nullable B ijBreakpoint) {
         if (ijBreakpoint == null) {
-            // Retrieve the IntelliJ breakpoint by the id.
-            ijBreakpoint = findBreakpointById(breakpoint.getId());
+            // Retrieve the IntelliJ breakpoints by the id: a debug adapter can return the same id
+            // for several breakpoints (ex: identical breakpoints on the same line).
+            for (B breakpointWithId : findBreakpointsById(breakpoint.getId())) {
+                updateBreakpoint(breakpoint, breakpointWithId);
+            }
+            return;
         }
         if (ijBreakpoint instanceof XLineBreakpoint<?> lineBreakpoint) {
             // Update the IntelliJ breakpoint according the DAP breakpoint 'verified' flag.
@@ -151,23 +156,23 @@ public abstract class BreakpointHandlerBase<B extends XBreakpoint<?>> extends XB
 
 
     /**
-     * Returns the IntelliJ breakpoint from the DAP breakpoint id and null otherwise.
+     * Returns the IntelliJ breakpoints with the given DAP breakpoint id.
      *
      * @param id the DAP breakpoint id.
-     * @return the IntelliJ breakpoint from the DAP breakpoint id and null otherwise.
+     * @return the IntelliJ breakpoints with the given DAP breakpoint id.
      */
-    @Nullable
-    private B findBreakpointById(@Nullable Integer id) {
+    protected @NotNull List<B> findBreakpointsById(@Nullable Integer id) {
         if (id == null) {
-            return null;
+            return List.of();
         }
+        List<B> result = new ArrayList<>();
         for (var breakpoint : breakpoints) {
             Integer breakpointId = breakpoint.getUserData(DAP_BREAKPOINT_ID);
             if (id.equals(breakpointId)) {
-                return breakpoint;
+                result.add(breakpoint);
             }
         }
-        return null;
+        return result;
     }
 
     /**
