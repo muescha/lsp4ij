@@ -30,6 +30,7 @@ import org.jetbrains.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.List;
@@ -47,6 +48,11 @@ public abstract class BreakpointHandlerBase<B extends XBreakpoint<?>> extends XB
 
     protected static final CompletableFuture<?>[] EMPTY_COMPLETABLE_FUTURES = new CompletableFuture[0];
     protected static final @NotNull Key<Integer> DAP_BREAKPOINT_ID = Key.create("dap.breakpoint.id");
+    /**
+     * The line where the debug adapter installed the breakpoint, which can differ from the IntelliJ line
+     * (ex: debugpy moves a breakpoint on a blank line to the previous statement).
+     */
+    protected static final @NotNull Key<Integer> DAP_BREAKPOINT_LINE = Key.create("dap.breakpoint.line");
 
     protected final @NotNull XDebugSession debugSession;
     protected final @NotNull DebugAdapterDescriptor debugAdapterDescriptor;
@@ -169,8 +175,15 @@ public abstract class BreakpointHandlerBase<B extends XBreakpoint<?>> extends XB
     public void updateBreakpoint(@NotNull Breakpoint breakpoint,
                                  @Nullable B ijBreakpoint) {
         if (ijBreakpoint == null) {
-            // Retrieve the IntelliJ breakpoint by the id.
-            ijBreakpoint = findBreakpointById(breakpoint.getId());
+            // Retrieve the IntelliJ breakpoints by the id: a debug adapter can return the same id
+            // for several breakpoints (ex: identical breakpoints on the same line).
+            for (B breakpointWithId : findBreakpointsById(breakpoint.getId())) {
+                updateBreakpoint(breakpoint, breakpointWithId);
+            }
+            return;
+        }
+        if (breakpoint.getLine() != null) {
+            ijBreakpoint.putUserData(DAP_BREAKPOINT_LINE, breakpoint.getLine());
         }
         if (ijBreakpoint instanceof XLineBreakpoint<?> lineBreakpoint) {
             // Update the IntelliJ breakpoint according the DAP breakpoint 'verified' flag.
@@ -201,6 +214,25 @@ public abstract class BreakpointHandlerBase<B extends XBreakpoint<?>> extends XB
             }
         }
         return null;
+    }
+
+    /**
+     * Returns the IntelliJ breakpoints with the given DAP breakpoint id.
+     *
+     * @param id the DAP breakpoint id.
+     * @return the IntelliJ breakpoints with the given DAP breakpoint id.
+     */
+    protected @NotNull List<B> findBreakpointsById(@Nullable Integer id) {
+        if (id == null) {
+            return List.of();
+        }
+        List<B> result = new ArrayList<>();
+        for (var breakpoint : breakpoints) {
+            if (id.equals(breakpoint.getUserData(DAP_BREAKPOINT_ID))) {
+                result.add(breakpoint);
+            }
+        }
+        return result;
     }
 
     /**

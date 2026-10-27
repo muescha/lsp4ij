@@ -253,6 +253,8 @@ public abstract class DAPBreakpointHandlerBase<B extends XBreakpoint<?>> extends
                         // a late response must not give it back the DAP id it had
                         if (ijBreakpoint != null && !shadowedBreakpoints.contains(ijBreakpoint)) {
                             ijBreakpoint.putUserData(DAP_BREAKPOINT_ID, breakpointResponse.getId());
+                            // Forget a line reported by a previous response, if this one reports none
+                            ijBreakpoint.putUserData(DAP_BREAKPOINT_LINE, breakpointResponse.getLine());
                             updateBreakpoint(breakpointResponse, ijBreakpoint);
                         }
                     }
@@ -402,6 +404,10 @@ public abstract class DAPBreakpointHandlerBase<B extends XBreakpoint<?>> extends
 
     /**
      * Returns the IntelliJ breakpoint from the DAP source and given line and null otherwise.
+     * <p>
+     * A breakpoint is compared by its effective line (see {@link #getEffectiveLine}): a breakpoint which
+     * the debug adapter moved away from the given line is not returned, and a breakpoint which it moved to
+     * the given line is. When several breakpoints match, a breakpoint which was not moved is returned first.
      *
      * @param source     the DAP source.
      * @param lineNumber the line number.
@@ -418,27 +424,43 @@ public abstract class DAPBreakpointHandlerBase<B extends XBreakpoint<?>> extends
             return null;
         }
         Set<LineLocation> dapBreakpointLines = getDAPBreakpointLines();
+        B movedBreakpoint = null;
         for (B breakpoint : breakpoints) {
             XSourcePosition breakpointPosition = breakpoint.getSourcePosition();
-            if (breakpointPosition == null || isShadowed(breakpoint, dapBreakpointLines)) {
+            if (breakpointPosition == null || isShadowed(breakpoint, dapBreakpointLines)
+                    || !isSameFile(breakpointPosition.getFile(), filePath)
+                    || getEffectiveLine(breakpoint, breakpointPosition) != lineNumber) {
                 // A shadowed breakpoint is not sent: the DAP breakpoint on the same line is the one reached
                 continue;
             }
-            VirtualFile fileInBreakpoint = breakpointPosition.getFile();
-            int line = breakpointPosition.getLine() + 1;
-            if (fileInBreakpoint.isInLocalFileSystem()) {
-                if (fileInBreakpoint.toNioPath().equals(filePath) && line == lineNumber) {
-                    return breakpoint;
-                }
-            } else {
-                // Virtual files (e.g. DAPFile backed by LightVirtualFile) don't support toNioPath().
-                // Fall back to comparing the VirtualFile path as a string. See #1447.
-                if (fileInBreakpoint.getPath().equals(filePath.toString()) && line == lineNumber) {
-                    return breakpoint;
-                }
+            if (breakpointPosition.getLine() + 1 == lineNumber) {
+                return breakpoint;
+            }
+            if (movedBreakpoint == null) {
+                movedBreakpoint = breakpoint;
             }
         }
-        return null;
+        return movedBreakpoint;
+    }
+
+    /**
+     * Returns the line where the debug adapter installed the given breakpoint (see {@link #DAP_BREAKPOINT_LINE}),
+     * or its IntelliJ line if the debug adapter didn't report one.
+     */
+    private int getEffectiveLine(@NotNull B breakpoint,
+                                 @NotNull XSourcePosition breakpointPosition) {
+        Integer dapLine = breakpoint.getUserData(DAP_BREAKPOINT_LINE);
+        return dapLine != null ? dapLine : breakpointPosition.getLine() + 1;
+    }
+
+    private static boolean isSameFile(@NotNull VirtualFile fileInBreakpoint,
+                                      @NotNull Path filePath) {
+        if (fileInBreakpoint.isInLocalFileSystem()) {
+            return fileInBreakpoint.toNioPath().equals(filePath);
+        }
+        // Virtual files (e.g. DAPFile backed by LightVirtualFile) don't support toNioPath().
+        // Fall back to comparing the VirtualFile path as a string. See #1447.
+        return fileInBreakpoint.getPath().equals(filePath.toString());
     }
 
     /**
