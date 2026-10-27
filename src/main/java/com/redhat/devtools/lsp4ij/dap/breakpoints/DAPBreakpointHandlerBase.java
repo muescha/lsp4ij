@@ -111,30 +111,45 @@ public abstract class DAPBreakpointHandlerBase<B extends XBreakpoint<?>> extends
     }
 
     /**
-     * Returns the DAP log message of a breakpoint which doesn't suspend, and null otherwise.
+     * Returns the DAP log message of a breakpoint which doesn't suspend and only logs its "Evaluate and log"
+     * expression, and null otherwise.
      * <p>
-     * For such a breakpoint, IntelliJ logs "Breakpoint reached" and the value of the "Evaluate and log" expression.
-     * As a DAP logpoint, the debug adapter logs them without stopping, with the expression in braces to be
-     * interpolated. A debug adapter which doesn't support logpoints ignores the message and stops: the client then
-     * evaluates the expression, logs and resumes.
+     * A DAP log point never stops, so it is used only when every debug adapter supports log points and the
+     * IntelliJ breakpoint neither logs the "Breakpoint hit" message nor the stack trace. In all other cases the
+     * breakpoint is sent as a normal breakpoint: the debug adapter stops, IntelliJ handles the message, the stack
+     * trace and the log expression, and the program is resumed if the breakpoint doesn't suspend.
      *
-     * @param breakpoint the IntelliJ breakpoint.
-     * @return the DAP log message of a breakpoint which doesn't suspend, and null otherwise.
+     * @param breakpoint        the IntelliJ breakpoint.
+     * @param supportsLogPoints true if the debug adapters support log points.
+     * @return the DAP log message, or null if the breakpoint is sent as a normal breakpoint.
      */
-    static @Nullable String getLogMessage(@NotNull XBreakpoint<?> breakpoint) {
-        if (breakpoint.getSuspendPolicy() != SuspendPolicy.NONE) {
+    static @Nullable String getLogMessage(@NotNull XBreakpoint<?> breakpoint, boolean supportsLogPoints) {
+        if (!supportsLogPoints
+                || breakpoint.getSuspendPolicy() != SuspendPolicy.NONE
+                || breakpoint.isLogMessage()
+                || breakpoint.isLogStack()) {
             return null;
         }
-        List<String> parts = new ArrayList<>();
-        XSourcePosition sourcePosition = breakpoint.getSourcePosition();
-        if (breakpoint.isLogMessage() && sourcePosition != null) {
-            parts.add("Breakpoint reached at " + sourcePosition.getFile().getName() + ":" + getLineNumber(sourcePosition));
-        }
         XExpression logExpression = breakpoint.getLogExpressionObject();
-        if (logExpression != null && StringUtils.isNotBlank(logExpression.getExpression())) {
-            parts.add("{" + logExpression.getExpression() + "}");
+        if (logExpression == null || StringUtils.isBlank(logExpression.getExpression())) {
+            return null;
         }
-        return parts.isEmpty() ? null : String.join("\n", parts);
+        // DAP interpolates expressions enclosed in {} and defines no escaping, so an expression
+        // which contains braces cannot be embedded safely: it is evaluated by IntelliJ instead.
+        String expression = logExpression.getExpression();
+        if (expression.indexOf('{') != -1 || expression.indexOf('}') != -1) {
+            return null;
+        }
+        return "{" + expression.trim() + "}";
+    }
+
+    /**
+     * Returns true if the given debug adapter, or every registered one if null, supports log points.
+     */
+    private boolean supportsLogPoints(@Nullable IDebugProtocolServer debugProtocolServer) {
+        List<IDebugProtocolServer> servers = debugProtocolServer != null ? List.of(debugProtocolServer) : debugProtocolServers;
+        return !servers.isEmpty()
+                && servers.stream().allMatch(server -> Boolean.TRUE.equals(getCapabilities(server).getSupportsLogPoints()));
     }
 
     private static @NotNull Source toDAPSource(@NotNull XSourcePosition sourcePosition) {
@@ -156,10 +171,11 @@ public abstract class DAPBreakpointHandlerBase<B extends XBreakpoint<?>> extends
         // The IJ breakpoint of each source breakpoint, in the same order, and null for the temporary breakpoint
         Map<Source, List<@Nullable B>> targetIJBreakpoints = new HashMap<>();
         Set<LineLocation> dapBreakpointLines = getDAPBreakpointLines();
+        boolean supportsLogPoints = supportsLogPoints(debugProtocolServer);
         for (B breakpoint : breakpoints) {
             var sourcePosition = breakpoint.getSourcePosition();
             if (sourcePosition != null && !isShadowed(breakpoint, dapBreakpointLines)) {
-                addSourceBreakpoint(sourcePosition, breakpoint.getConditionExpression(), getLogMessage(breakpoint), targetBreakpoints);
+                addSourceBreakpoint(sourcePosition, breakpoint.getConditionExpression(), getLogMessage(breakpoint, supportsLogPoints), targetBreakpoints);
                 targetIJBreakpoints.computeIfAbsent(toDAPSource(sourcePosition), s -> new ArrayList<>()).add(breakpoint);
             }
         }

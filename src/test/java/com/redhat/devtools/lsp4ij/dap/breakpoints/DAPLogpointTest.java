@@ -66,11 +66,15 @@ public class DAPLogpointTest extends HeavyPlatformTestCase {
             for (var breakpoint : List.of(suspends, logsValue, logsHit, logsBoth, logsNothing)) {
                 handler.registerBreakpoint(breakpoint);
             }
-            handler.initialize(server(requests), new Capabilities()).join();
+            var capabilities = new Capabilities();
+            capabilities.setSupportsLogPoints(true);
+            handler.initialize(server(requests), capabilities).join();
 
             assertEquals(1, requests.size());
             var sent = Arrays.stream(requests.get(0).getBreakpoints()).map(SourceBreakpoint::getLogMessage).toList();
-            assertEquals(Arrays.asList(null, "{n}", "Breakpoint reached at a.lua:3", "Breakpoint reached at a.lua:4\n{n + 1}", null), sent);
+            // Only a breakpoint which just logs its expression is a logpoint; one which logs the "Breakpoint hit"
+            // message stops, and IntelliJ logs the message
+            assertEquals(Arrays.asList(null, "{n}", null, null, null), sent);
         } finally {
             handler.dispose();
             FileUtil.delete(dir.toFile());
